@@ -249,6 +249,40 @@ private[kafka] class ZookeeperConsumerConnector(val config: ConsumerConfig,
     }
   }
 
+  def getCurrentOffsets: Map[TopicAndPartition, Long] = {
+    val offsets = for {
+      (topic, infos) <- topicRegistry
+      info <- infos.values
+    } yield {
+      val offset = info.getConsumeOffset
+      val topicAndPartition = TopicAndPartition(topic, info.partitionId)
+      (topicAndPartition, offset)
+    }
+    offsets.toMap
+  }
+
+  def unsafeCommitOffsets(offsets: Map[TopicAndPartition, Long]): Unit = {
+    if (zkClient == null) {
+      error("zk client is null. Cannot commit offsets")
+      return
+    }
+    for ((tap, newOffset) <- offsets) {
+      val TopicAndPartition(topic, partitionId) = tap
+      val topicDirs = new ZKGroupTopicDirs(config.groupId, topic)
+      if (newOffset != checkpointedOffsets.get(tap)) {
+        try {
+          updatePersistentPath(zkClient, topicDirs.consumerOffsetDir + "/" + partitionId, newOffset.toString)
+          checkpointedOffsets.put(tap, newOffset)
+        } catch {
+          case t: Throwable =>
+            // log it and let it go
+            warn("exception during commitOffsets", t)
+        }
+        debug("Committed offset " + newOffset + " for topic " + topic)
+      }
+    }
+  }
+
   def commitOffsets() {
     if (zkClient == null) {
       error("zk client is null. Cannot commit offsets")
