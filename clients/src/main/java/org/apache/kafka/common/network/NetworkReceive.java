@@ -17,6 +17,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.ScatteringByteChannel;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * A size delimited Receive that consists of a 4 byte network-ordered size N followed by N bytes of content
@@ -25,6 +27,38 @@ public class NetworkReceive implements Receive {
 
     public final static String UNKNOWN_SOURCE = "";
     public final static int UNLIMITED = -1;
+    private final static List<ByteBuffer> bufferCache = new ArrayList<>();
+    private final static int bufferCacheMaxSize = Integer.getInteger("fdio.kafka.buffer-cache-size", 20);
+
+    public static synchronized void releaseBuffer(ByteBuffer buffer) {
+        bufferCache.add(buffer);
+
+        // remove smallest buffers
+
+        while (bufferCache.size() > bufferCacheMaxSize) {
+            int smallestIndex = -1;
+            int smallestCapacity = Integer.MAX_VALUE;
+
+            for (int i = 0; i < bufferCache.size(); i++) {
+                int capacity = bufferCache.get(i).capacity();
+                if (capacity < smallestCapacity) {
+                    smallestIndex = i;
+                    smallestCapacity = capacity;
+                }
+            }
+            bufferCache.remove(smallestIndex);
+        }
+    }
+
+    private static synchronized ByteBuffer acquireBuffer(int minCapacity) {
+        for (int i = 0; i < bufferCache.size(); i++) {
+            int capacity = bufferCache.get(i).capacity();
+            if (capacity > minCapacity) {
+                return bufferCache.remove(i);
+            }
+        }
+        return null;
+    }
 
     private final String source;
     private final ByteBuffer size;
@@ -89,7 +123,14 @@ public class NetworkReceive implements Receive {
                 if (maxSize != UNLIMITED && receiveSize > maxSize)
                     throw new InvalidReceiveException("Invalid receive (size = " + receiveSize + " larger than " + maxSize + ")");
 
-                this.buffer = ByteBuffer.allocate(receiveSize);
+                ByteBuffer cachedBuffer = acquireBuffer(receiveSize);
+                if (cachedBuffer != null) {
+                    cachedBuffer.clear();
+                    cachedBuffer.limit(receiveSize);
+                    this.buffer = cachedBuffer;
+                } else {
+                    this.buffer = ByteBuffer.allocate(receiveSize);
+                }
             }
         }
         if (buffer != null) {
